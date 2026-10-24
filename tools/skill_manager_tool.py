@@ -406,6 +406,8 @@ def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label:
     atomic_write_text(target, content, preserve_mode=True, create_mode=0o644)
     scan_error = _security_scan_skill(skill_dir)
     if not scan_error:
+        from tools.skill_manager_guards import mark_background_review_skill_write
+        mark_background_review_skill_write(name)
         return None
     if original is not None:
         atomic_write_text(target, original, preserve_mode=True)

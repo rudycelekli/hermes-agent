@@ -68,9 +68,37 @@ def _background_review_has_read(path: Path) -> bool:
     return marks is not None and marks.contains(_resolved_str(path))
 
 
+_background_review_written_skills: _ctxvars.ContextVar[Optional[_BackgroundReviewReadMarks]] = (
+    _ctxvars.ContextVar("background_review_written_skills", default=None))
+
+
+def mark_background_review_skill_write(name: str) -> None:
+    """Record that this review successfully wrote ``name``.
+
+    Copied tool workers share the set seeded at review start, same as read marks.
+    A consolidation delete may name only an umbrella this run actually wrote.
+    """
+    if not _is_background_review() or not isinstance(name, str) or not name.strip():
+        return
+    if (marks := _background_review_written_skills.get()) is None:
+        _background_review_written_skills.set(marks := _BackgroundReviewReadMarks())
+    marks.add(name.strip())
+
+
+def _background_review_has_written(name: str) -> bool:
+    marks = _background_review_written_skills.get()
+    return marks is not None and marks.contains(name.strip())
+
+
 def _reset_background_review_read_marks() -> None:
-    """Start a fresh, isolated read set for the current review context."""
+    """Start a fresh, isolated read set for the current review context.
+
+    Also seeds the write-mark set. Workers run on copied contexts, so a store
+    created inside one worker would stay private and a later delete could not
+    see a patch that worker just made.
+    """
     _background_review_read_paths.set(_BackgroundReviewReadMarks())
+    _background_review_written_skills.set(_BackgroundReviewReadMarks())
 
 
 def _resolved_roots(skill_path: Path):
@@ -232,21 +260,31 @@ def _background_review_preflight(action: str, name: str) -> Optional[dict[str, A
 def _curator_consolidation_delete_guard(
     name: str, absorbed_into: Optional[str]) -> Optional[dict[str, Any]]:
     """Fail closed on unverified deletes during the curator consolidation pass. The fork's only
-    legitimate delete is a consolidation declared via ``absorbed_into=<umbrella>`` (existence
-    validated in ``_delete_skill``); the deterministic inactivity prune never calls skill_manage,
-    so a bare delete here can only be the LLM pass pruning without evidence.
+    legitimate delete is a consolidation into an umbrella this review actually wrote (existence
+    is still validated in ``_delete_skill``). A name that merely exists is not evidence of a
+    transfer. The deterministic inactivity prune never calls skill_manage, so a bare delete
+    here can only be the LLM pass pruning without evidence.
 
     A delete with no forwarding target — ``absorbed_into`` omitted (``None``) or empty (``""``) — is the
     fail-open behavior reported in #29912: the consolidation pass archived whole clusters of active skills
     with zero verified consolidations (``consolidated_this_run == 0``), leaving active automations pointing
     at names that no longer resolve. Refuse it; keep the skill active.
     """
-    if not _is_background_review() or (isinstance(absorbed_into, str) and absorbed_into.strip()):
+    if not _is_background_review():
         return None
-    return _refusal(
-        f"Refusing background curator delete of skill '{name}': the consolidation pass may only "
-        f"archive a skill it has absorbed into an umbrella. Pass absorbed_into=<umbrella> (the "
-        f"umbrella must already exist) to record a verified consolidation. Pruning a skill with no "
-        f"forwarding target is not permitted here — the deterministic inactivity prune handles "
-        f"staleness archival separately. Keeping '{name}' active.",
-        _fail_closed=True)
+    umbrella = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
+    if not umbrella:
+        return _refusal(
+            f"Refusing background curator delete of skill '{name}': the consolidation pass may only "
+            f"archive a skill it has absorbed into an umbrella. Pass absorbed_into=<umbrella> (the "
+            f"umbrella must already exist) to record a verified consolidation. Pruning a skill with no "
+            f"forwarding target is not permitted here — the deterministic inactivity prune handles "
+            f"staleness archival separately. Keeping '{name}' active.",
+            _fail_closed=True)
+    if not _background_review_has_written(umbrella):
+        return _refusal(
+            f"Refusing background curator delete of skill '{name}': absorbed_into='{umbrella}' "
+            f"was not written during this review. Patch or write the umbrella with the absorbed "
+            f"content first, then retry the delete. Keeping '{name}' active.",
+            _fail_closed=True)
+    return None

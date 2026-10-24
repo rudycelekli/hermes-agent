@@ -1180,6 +1180,25 @@ class TestDeleteSkillRmtreeGuard:
 # ---------------------------------------------------------------------------
 
 
+def _seed_curator_skills(tmp_path, monkeypatch):
+    """Create the source and umbrella before the review fork starts.
+
+    Creating them inside the fork would itself count as a write, which is not
+    the failure under test: an umbrella that already existed and was never
+    touched this review.
+    """
+    hermes_home = tmp_path / ".hermes"
+    skills_root = hermes_home / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+         patch("tools.skills_tool.SKILLS_DIR", skills_root), \
+         patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]):
+        _create_curator_skill("active-skill", _skill_content("active-skill"))
+        _create_curator_skill("umbrella", _skill_content("umbrella"))
+    return skills_root
+
+
 @contextmanager
 def _curator_pass(tmp_path, *, monkeypatch):
     """Run the body as the curator/background-review fork.
@@ -1255,6 +1274,39 @@ class TestCuratorConsolidationDeleteGuard:
         assert result.get("_fail_closed") is True
         # Skill must remain active on disk — fail closed, no archive.
         assert (skills_root / "active-skill").exists()
+
+    def test_existing_umbrella_that_was_not_written_cannot_absorb(self, tmp_path, monkeypatch):
+        """Naming a skill that already exists is not a transfer (#143817)."""
+        from tools.skill_manager_guards import _reset_background_review_read_marks
+
+        skills_root = _seed_curator_skills(tmp_path, monkeypatch)
+        _reset_background_review_read_marks()
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            result = _delete_skill("active-skill", absorbed_into="umbrella")
+        assert result["success"] is False
+        assert result.get("_fail_closed") is True
+        assert "was not written" in result["error"]
+        assert (skills_root / "active-skill" / "SKILL.md").is_file()
+
+    def test_umbrella_written_this_review_can_absorb(self, tmp_path, monkeypatch):
+        from tools.skills_tool import skill_view
+        from tools.skill_manager_guards import _reset_background_review_read_marks
+
+        skills_root = _seed_curator_skills(tmp_path, monkeypatch)
+        _reset_background_review_read_marks()
+        with _curator_pass(tmp_path, monkeypatch=monkeypatch):
+            assert json.loads(skill_view("umbrella"))["success"] is True
+            patched = json.loads(skill_manage(
+                action="patch",
+                name="umbrella",
+                old_string="Step 1: Do the thing.",
+                new_string="Step 1: Do the thing.\nAbsorbed active-skill.",
+            ))
+            assert patched["success"] is True, patched
+            result = _delete_skill("active-skill", absorbed_into="umbrella")
+        assert result["success"] is True, result
+        assert result.get("_archived") is True
+        assert not (skills_root / "active-skill" / "SKILL.md").exists()
 
     def test_background_review_read_survives_copied_tool_contexts(
         self, tmp_path, monkeypatch
