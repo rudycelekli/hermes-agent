@@ -230,3 +230,26 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+def test_placeholder_owner_is_not_a_repository_contract():
+    from hermes_cli.kanban_pr_acceptance import validate_contract
+
+    for placeholder in ("OWNER/retailtwin-ai", "owner/real-repo", "Owner/REPO"):
+        with pytest.raises(ValueError, match="placeholder"):
+            validate_contract(placeholder)
+    assert validate_contract("actual-owner/retailtwin-ai") == "actual-owner/retailtwin-ai"
+    assert validate_contract("https://github.com/owner/retailtwin-ai/pull/7") == (
+        "https://github.com/owner/retailtwin-ai/pull/7"
+    )
+    assert validate_contract("local-only") == "local-only"
+    assert validate_contract(None) == "local-only"
+
+
+def test_placeholder_owner_does_not_create_a_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    kb.init_db()
+    with connect() as conn:
+        with pytest.raises(ValueError, match="placeholder"):
+            kb.create_task(conn, title="Publish", completion_contract="OWNER/retailtwin-ai")
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0

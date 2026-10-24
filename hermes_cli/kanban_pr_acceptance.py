@@ -18,6 +18,9 @@ from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
+# Docs and the schema spell the slug shape as OWNER/REPO. Copied literally, that
+# owner can never match the repository a real pull request is opened from.
+_PLACEHOLDER_OWNERS = frozenset({"owner"})
 
 
 def validate_contract(value: str | None) -> str:
@@ -25,6 +28,13 @@ def validate_contract(value: str | None) -> str:
         return "local-only"
     if not isinstance(value, str) or not (_REPO.fullmatch(value) or _PR.fullmatch(value)):
         raise ValueError("completion_contract must be local-only, OWNER/REPO, or an exact GitHub PR URL")
+    if _REPO.fullmatch(value):
+        owner = value.split("/", 1)[0]
+        if owner.casefold() in _PLACEHOLDER_OWNERS:
+            raise ValueError(
+                f"completion_contract {value} is a placeholder, not a repository; "
+                "use the real owner/repo, `local-only`, or an exact GitHub PR URL."
+            )
     return value
 
 
