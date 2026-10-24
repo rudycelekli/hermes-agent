@@ -11,16 +11,33 @@ logger = logging.getLogger("run_agent")  # origin module's logger name: log reco
 
 
 def _socket_is_dead(sock) -> bool:
-    """Probe socket health with a non-blocking recv peek."""
+    """Probe socket health with a non-blocking recv peek.
+
+    ``setblocking(False)`` is the portability mechanism. ``MSG_DONTWAIT`` does
+    not exist on Windows, and ``ssl.SSLSocket.recv`` rejects every non-zero
+    flag, so an HTTPS pool used to raise before it could report a dead
+    connection. TLS sockets are peeked on the underlying TCP fd: that keeps
+    ``MSG_PEEK`` (a buffered record is not consumed) and leaves the SSL object
+    untouched.
+    """
     import socket as _socket
+    import ssl
+
+    borrowed = None
+    probe = sock
     try:
-        sock.setblocking(False)
-        return sock.recv(1, _socket.MSG_PEEK | _socket.MSG_DONTWAIT) == b""
+        if isinstance(sock, ssl.SSLSocket):
+            borrowed = _socket.socket(fileno=sock.fileno())
+            probe = borrowed
+        probe.setblocking(False)
+        return probe.recv(1, _socket.MSG_PEEK) == b""
     except BlockingIOError:
         return False  # no data available: socket is healthy
     except OSError:
         return True
     finally:
+        if borrowed is not None:
+            borrowed.detach()
         with contextlib.suppress(OSError):
             sock.setblocking(True)
 

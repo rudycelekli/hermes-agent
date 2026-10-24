@@ -63,3 +63,48 @@ def test_cleanup_rebuilds_dead_primary_client():
         reason="dead_connection_cleanup"
     )
     agent._close_cached_request_openai_client.assert_not_called()
+
+
+def test_probe_does_not_need_msg_dontwait_and_peeks_under_tls(monkeypatch):
+    """HTTPS pools yield SSLSockets, and Windows has no MSG_DONTWAIT."""
+    import socket
+    import ssl
+
+    from agent.agent_runtime_helpers_dead_connections import _socket_is_dead
+
+    monkeypatch.delattr(socket, "MSG_DONTWAIT", raising=False)
+    live, peer = socket.socketpair()
+    closed, closer = socket.socketpair()
+    closer.close()
+    try:
+        assert _socket_is_dead(live) is False
+        assert _socket_is_dead(closed) is True
+    finally:
+        live.close()
+        peer.close()
+        closed.close()
+
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pem = Path(tmp) / "probe.pem"
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(pem),
+                "-out", str(pem), "-days", "1", "-nodes", "-subj", "/CN=localhost",
+            ],
+            check=True, capture_output=True,
+        )
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(pem)
+        raw_server, raw_client = socket.socketpair()
+        tls = server_ctx.wrap_socket(raw_server, server_side=True, do_handshake_on_connect=False)
+        try:
+            assert _socket_is_dead(tls) is False
+            raw_client.close()
+            assert _socket_is_dead(tls) is True
+        finally:
+            tls.close()
+            raw_client.close()
