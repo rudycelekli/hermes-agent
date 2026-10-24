@@ -82,7 +82,7 @@ def test_pr_completion_requires_current_required_evidence(github):
             github.update(conclusion=conclusion, head="a" * 40)
             tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
             ok = kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-            assert ok is (conclusion == "success")
+            assert ok is (conclusion in {"success", "skipped"})
             task = kb.get_task(conn, tid)
             assert (task.status == "done") is ok
             receipts = [json.loads(r[0]) for r in conn.execute(
@@ -230,3 +230,15 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+def test_completed_skipped_required_check_is_satisfied():
+    """A path-filtered required check finishes as skipped and GitHub still merges."""
+    from hermes_cli.kanban_pr_acceptance import _classify
+
+    sha = "a" * 40
+    skipped = {"head_sha": sha, "status": "completed", "conclusion": "skipped"}
+    assert _classify(skipped, sha, "skipped", True) == "success"
+    assert _classify({**skipped, "status": "in_progress"}, sha, "skipped", True) == "pending"
+    assert _classify(skipped, sha, "cancelled", True) == "infra"
+    assert _classify(skipped, sha, "failure", True) == "failure"

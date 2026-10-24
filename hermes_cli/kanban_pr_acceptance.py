@@ -195,4 +195,9 @@ def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
         return "stale"
     if is_run and check.get("status") != "completed":
         return "pending"
+    # GitHub treats a completed required check whose workflow was path-filtered
+    # (conclusion "skipped") as satisfied — that is why the PR can merge. Only a
+    # completed skip counts; a skip that has not finished is still pending above.
+    if is_run and outcome == "skipped":
+        return "success"
     return {"success": "success", "failure": "failure", "error": "infra", "pending": "pending"}.get(outcome, "infra")
