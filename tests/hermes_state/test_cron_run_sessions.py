@@ -5,6 +5,7 @@ Since the unified runtime, an agent fire is created through the session authorit
 carry ``cron_{job_id}_{timestamp}``. These drive that real producer over SQLite (admission only,
 no agent turn) and read back through ``SessionDB.list_cron_job_runs``.
 """
+import asyncio
 import sqlite3
 
 import pytest
@@ -96,6 +97,52 @@ async def test_an_execution_id_admitted_with_a_colon_before_the_upgrade_keeps_it
         (sid, job, 'fire:1')]
     assert owner.db.list_cron_job_runs(f'{job}:fire') == []
     assert owner.db.cron_run_identity(sid) == {'cron_job_id': job, 'cron_execution_id': 'fire:1'}
+
+
+def test_finished_legacy_cron_session_deletes_without_a_live_mount(owner):
+    """Dashboard delete of ``cron_<job>_<stamp>`` used to 404: the row is not a route and not an
+    API binding, so authorize asked restore_api_session. The CLI deletes the same row (#143845)."""
+    from gateway.session_contract import Principal, SessionRef
+    from gateway.session_mutations import mutate_session
+
+    async def scenario():
+        return await _delete_finished_legacy_cron(owner, Principal, SessionRef, mutate_session)
+
+    asyncio.run(scenario())
+
+
+async def _delete_finished_legacy_cron(owner, Principal, SessionRef, mutate_session):
+    sid = 'cron_daily_20261011_120000'
+    owner.db.create_session(sid, source='cron')
+    owner.db._conn.execute(
+        "UPDATE sessions SET ended_at = 1, end_reason = 'completed', session_key = ? WHERE id = ?",
+        ('agent:main:cron:daily', sid))
+    owner.db._conn.commit()
+    owner.runner.session_store._db = owner.db
+    row = owner.db.get_session(sid)
+    actor = Principal(
+        'dashboard', owner.profile_id, frozenset({'session:read', 'session:control'}), 'dash')
+    deleted = await mutate_session(owner, actor, SessionRef(owner.profile_id, sid), {
+        'session_id': sid, 'request_id': 'dash-delete',
+        'expected_revision': row['runtime_revision'],
+        'expected_generation': row['runtime_generation'],
+        'operation': 'delete', 'payload': {},
+    })
+    assert sid in deleted['deleted_ids']
+    assert owner.db.get_session(sid) is None
+
+    open_sid = 'cron_daily_20261011_130000'
+    owner.db.create_session(open_sid, source='cron')
+    owner.db._conn.execute(
+        'UPDATE sessions SET session_key = ? WHERE id = ?', ('agent:main:cron:daily-open', open_sid))
+    owner.db._conn.commit()
+    with pytest.raises(RuntimeStoreError, match='not_found'):
+        await mutate_session(owner, actor, SessionRef(owner.profile_id, open_sid), {
+            'session_id': open_sid, 'request_id': 'dash-open',
+            'expected_revision': 0, 'expected_generation': 0,
+            'operation': 'delete', 'payload': {},
+        })
+    assert owner.db.get_session(open_sid) is not None
 
 
 def test_legacy_runs_of_a_job_whose_id_extends_another_stay_with_their_own_job(tmp_path):

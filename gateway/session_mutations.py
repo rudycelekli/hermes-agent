@@ -37,6 +37,19 @@ def _authorize_import(authority, actor, ref, params):
     return tuple(item['session']['id'] for item in normalized)
 
 
+def _finished_legacy_cron(authority, session_id) -> bool:
+    """A pre-unified ``cron_<job>_<stamp>`` transcript has no route and no API binding.
+
+    ``authorize`` then calls ``restore_api_session``, which answers ``not_found`` while the row
+    is still in ``sessions``. The CLI deletes that row directly. A finished one takes the same
+    store delete, without mounting a live session the scheduler no longer runs (#143845).
+    """
+    if not str(session_id).startswith('cron_') or session_id in authority.sessions:
+        return False
+    row = authority.db.get_session(session_id)
+    return bool(row and row.get('source') == 'cron' and row.get('ended_at'))
+
+
 def _authorize_control(authority, actor, ref, params, owner=None):
     """Control authorization; True when the session is cold history the write must claim. *owner* is
     ``_owner_ref``'s answer when the caller already resolved it (one read per mutation, not two)."""
@@ -50,6 +63,8 @@ def _authorize_control(authority, actor, ref, params, owner=None):
     # transaction still verifies the entire digest and current epoch.
     if not has_mutation_receipt(authority.db, actor.subject, ref.session_id, params['request_id']):
         ref = owner or _owner_ref(authority, ref, params)
+        if params.get('operation') == 'delete' and _finished_legacy_cron(authority, ref.session_id):
+            return False
         if ref.session_id not in authority.sessions:
             from hermes_state_mutation_binding import authorize_history
             with authority.db._read_ctx() as conn:
