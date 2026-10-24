@@ -1012,13 +1012,25 @@ class GatewayBusySessionMixin:
         "loop", "refine", "review", "voice", "curator",
     )
 
+    # Missing methods are logged once. Building this table is on the idle path of every
+    # message, so one absent handler used to raise before the text was even classified (#143844).
+    _missing_command_handlers: set[str] = set()
+
     def _command_handler_table(self, names) -> dict[str, Any]:
-        return {
-            name: getattr(
-                self, self._COMMAND_HANDLER_ALIASES.get(name, f"_handle_{name.replace('-', '_')}_command"),
-            )
-            for name in names
-        }
+        table: dict[str, Any] = {}
+        for name in names:
+            method = self._COMMAND_HANDLER_ALIASES.get(name, f"_handle_{name.replace('-', '_')}_command")
+            handler = getattr(self, method, None)
+            if handler is None:
+                if method not in self._missing_command_handlers:
+                    self._missing_command_handlers.add(method)
+                    logger.error(
+                        "gateway slash command %s has no %s; other messages keep running",
+                        name, method,
+                    )
+                continue
+            table[name] = handler
+        return table
 
     def _gateway_plain_command_handlers(self):
         """Return ordinary slash handlers shared by idle and busy dispatch."""
